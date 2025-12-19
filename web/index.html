@@ -1,0 +1,181 @@
+<!--python -m uvicorn src.api_app:app --host 127.0.0.1 --port 8000-->
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>CAIL 文本预测 Demo（阈值筛选）</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial; margin:24px; max-width:980px;}
+    textarea{width:100%; height:220px; padding:12px; font-size:14px; line-height:1.55; border:1px solid #ccc; border-radius:12px;}
+    .row{display:flex; flex-wrap:wrap; gap:10px 12px; align-items:center; margin:12px 0;}
+    label{font-size:13px; color:#333;}
+    input, select{
+      padding:10px; border:1px solid #ccc; border-radius:12px; font-size:14px;
+      height:40px;
+    }
+    input.small{width:110px;}
+    button{padding:10px 14px; border:0; border-radius:12px; cursor:pointer; font-size:14px; height:40px;}
+    button:disabled{opacity:.6; cursor:not-allowed;}
+    .muted{color:#666; font-size:12px;}
+    .card{border:1px solid #eee; border-radius:16px; padding:14px; margin-top:14px; background:#fafafa;}
+    .grid{display:grid; grid-template-columns:1fr 1fr; gap:14px;}
+    h1{margin:0 0 6px 0; font-size:20px;}
+    h2{margin:0 0 10px 0; font-size:16px;}
+    ul{margin:8px 0 0 18px;}
+    li{margin:6px 0;}
+    .badge{display:inline-block; padding:3px 8px; border-radius:999px; background:#e9f2ff; font-size:12px;}
+    pre{white-space:pre-wrap; word-break:break-word; background:#0b1020; color:#e7e7e7; padding:12px; border-radius:12px;}
+    .err{color:#b00020; white-space:pre-wrap;}
+    .ok{color:#0a7a29;}
+    .pill{display:inline-flex; align-items:center; gap:6px; padding:6px 10px; border-radius:999px; background:#fff; border:1px solid #eee;}
+  </style>
+</head>
+<body>
+  <h1>司法要素预测 Demo（阈值筛选）</h1>
+  <div class="muted">
+    调用：
+    <span class="badge">POST http://127.0.0.1:8000/predict</span>
+    （先启动 uvicorn）
+  </div>
+
+  <textarea id="fact" placeholder="在这里粘贴案件事实 fact..."></textarea>
+
+  <div class="row">
+    <span class="pill">
+      <label for="maxLen">max_len</label>
+      <input id="maxLen" class="small" type="number" value="256" min="32" max="1024" step="32" />
+    </span>
+
+    <span class="pill">
+      <label for="th">threshold</label>
+      <input id="th" class="small" type="number" value="0.20" min="0" max="1" step="0.05" />
+    </span>
+
+    <span class="pill">
+      <label for="topk">TopK</label>
+      <input id="topk" class="small" type="number" value="5" min="1" max="20" step="1" />
+    </span>
+
+    <span class="pill">
+      <label for="mode">mode</label>
+      <select id="mode">
+        <option value="threshold" selected>threshold（阈值筛选）</option>
+        <option value="topk">topk（永远TopK）</option>
+      </select>
+    </span>
+
+    <button id="btn">预测</button>
+    <span id="status" class="muted"></span>
+  </div>
+
+  <div id="out" class="card" style="display:none;">
+    <div class="grid">
+      <div>
+        <h2>罪名 Top</h2>
+        <ul id="acc"></ul>
+      </div>
+      <div>
+        <h2>法条 Top</h2>
+        <ul id="art"></ul>
+      </div>
+    </div>
+
+    <div style="margin-top:14px;">
+      <h2>刑期区间</h2>
+      <div id="term"></div>
+      <div class="muted" id="meta"></div>
+    </div>
+
+    <details style="margin-top:14px;">
+      <summary>查看原始 JSON</summary>
+      <pre id="raw"></pre>
+    </details>
+  </div>
+
+  <div id="err" class="err" style="margin-top:12px;"></div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+
+  function li(text){
+    const el = document.createElement("li");
+    el.textContent = text;
+    return el;
+  }
+
+  function fmtList(ary){
+    // ary: [[label, prob], ...]
+    if(!ary || ary.length === 0) return ["（无：没有标签超过阈值，或 topk=0）"];
+    return ary.map(([name, p], i) => `${i+1}. ${name}  置信度=${Number(p).toFixed(4)}`);
+  }
+
+  $("btn").addEventListener("click", async () => {
+    $("err").textContent = "";
+    $("out").style.display = "none";
+    $("status").textContent = "请求中...";
+    $("btn").disabled = true;
+
+    const fact = $("fact").value.trim();
+    const max_len = Number($("maxLen").value || 256);
+    const threshold = Number($("th").value || 0.20);
+    const topk = Number($("topk").value || 5);
+    const mode = $("mode").value || "threshold";
+
+    if(!fact){
+      $("err").textContent = "请先输入 fact 文本。";
+      $("status").textContent = "";
+      $("btn").disabled = false;
+      return;
+    }
+
+    try{
+      const resp = await fetch("http://127.0.0.1:8000/predict", {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({ fact, max_len, threshold, mode, topk })
+      });
+
+      if(!resp.ok){
+        const t = await resp.text();
+        throw new Error(`HTTP ${resp.status}: ${t}`);
+      }
+
+      const data = await resp.json();
+
+      // 渲染：罪名
+      $("acc").innerHTML = "";
+      fmtList(data.accusation_top5).forEach(s => $("acc").appendChild(li(s)));
+
+      // 渲染：法条
+      $("art").innerHTML = "";
+      fmtList(data.articles_top5).forEach(s => $("art").appendChild(li(s)));
+
+      // 刑期
+      $("term").textContent = `${data.term_range}（term_bin=${data.term_bin}）`;
+
+      // meta（可选）
+      if(data.meta){
+        $("meta").textContent = `mode=${data.meta.mode}, threshold=${data.meta.threshold}, topk=${data.meta.topk}, max_len=${data.meta.max_len}, device=${data.meta.device}`;
+      }else{
+        $("meta").textContent = "";
+      }
+
+      $("raw").textContent = JSON.stringify(data, null, 2);
+
+      $("out").style.display = "block";
+      $("status").textContent = "完成";
+      $("status").className = "muted ok";
+    }catch(e){
+      $("err").textContent =
+        "调用失败：\n" + e.message +
+        "\n\n排查：\n1) uvicorn 是否在运行\n2) 打开 http://127.0.0.1:8000/docs 看 /predict 是否可用\n3) 防火墙/代理是否拦截本地端口";
+      $("status").textContent = "";
+      $("status").className = "muted";
+    }finally{
+      $("btn").disabled = false;
+    }
+  });
+</script>
+</body>
+</html>
